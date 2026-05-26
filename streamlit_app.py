@@ -5,18 +5,20 @@ from __future__ import annotations
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import time
+import os
 from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
 from config import (
     STORAGE_STOCKS,
     REFRESH_INTERVAL_SECONDS,
     NEWS_REFRESH_CYCLES,
     MAX_NEWS_DISPLAY,
+    CACHE_DIR,
 )
 from src.utils import now_cst, get_market_status, is_trading_hours, format_cst, today_str
 from src.fetcher import fetch_quotes, fetch_sector_history
-from src.news_fetcher import fetch_news, get_new_uncached_news
+from src.news_fetcher import fetch_news
 from src.sentiment import get_analyzer
 
 # ============================================================
@@ -37,9 +39,6 @@ st.markdown("""
     .sentiment-bullish { color: #e53935; font-weight: bold; font-size: 1.1rem; }
     .sentiment-bearish { color: #43a047; font-weight: bold; font-size: 1.1rem; }
     .sentiment-neutral { color: #757575; font-weight: bold; font-size: 1.1rem; }
-    .stock-up { color: #e53935; }
-    .stock-down { color: #43a047; }
-    .metric-label { color: #888; font-size: 0.85rem; }
     .news-card { padding: 12px; margin: 8px 0; border-radius: 8px; border-left: 4px solid #ddd; }
     .news-card.bullish { border-left-color: #e53935; background: #fff5f5; }
     .news-card.bearish { border-left-color: #43a047; background: #f5fff5; }
@@ -52,13 +51,13 @@ st.markdown("""
 # ============================================================
 if "init" not in st.session_state:
     st.session_state.init = True
-    st.session_state.running = False
     st.session_state.cycle_count = 0
     st.session_state.last_refresh = None
     st.session_state.quotes_df = pd.DataFrame()
     st.session_state.news_data = []
     st.session_state.sector_history = pd.DataFrame()
     st.session_state.errors = []
+    st.session_state.auto_refresh = False
 
 
 # ============================================================
@@ -74,7 +73,7 @@ def refresh_data(force_news: bool = False) -> None:
         if not df.empty:
             st.session_state.quotes_df = df
     except Exception as e:
-        errors.append(f"行情获取失败: {e}")
+        errors.append(f"行情获取: {e}")
 
     # 板块指数
     try:
@@ -82,9 +81,9 @@ def refresh_data(force_news: bool = False) -> None:
         if not hist.empty:
             st.session_state.sector_history = hist
     except Exception as e:
-        errors.append(f"板块指数获取失败: {e}")
+        errors.append(f"板块指数: {e}")
 
-    # 新闻（每 N 个周期刷新一次）
+    # 新闻（首次或手动刷新时拉取）
     if force_news or st.session_state.cycle_count % NEWS_REFRESH_CYCLES == 0:
         try:
             raw_news = fetch_news(force_refresh=force_news)
@@ -92,7 +91,7 @@ def refresh_data(force_news: bool = False) -> None:
             enriched = analyzer.analyze_news_list(raw_news)
             st.session_state.news_data = enriched
         except Exception as e:
-            errors.append(f"新闻获取失败: {e}")
+            errors.append(f"新闻获取: {e}")
 
     st.session_state.last_refresh = now_cst()
     st.session_state.cycle_count += 1
@@ -109,7 +108,7 @@ def render_header() -> None:
 
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
-        st.title("🏭 A股存储板块情绪日报")
+        st.title("A股存储板块情绪日报")
     with col2:
         color = "#e53935" if is_trading else "#888"
         st.markdown(
@@ -125,14 +124,14 @@ def render_header() -> None:
 
     if st.session_state.errors:
         for err in st.session_state.errors:
-            st.warning(f"⚠️ {err}（显示缓存数据）")
+            st.warning(f"⚠️ {err}（使用缓存数据）")
 
 
 def render_sector_overview() -> None:
     """板块概览 KPI 行"""
     df = st.session_state.quotes_df
     if df.empty:
-        st.info("暂无行情数据，请点击侧边栏刷新")
+        st.info("暂无行情数据，点击侧边栏「手动刷新」获取数据")
         return
 
     up_count = len(df[df["涨跌幅"] > 0])
@@ -142,8 +141,7 @@ def render_sector_overview() -> None:
     total_amount = df["成交额"].sum() if not df.empty else 0
 
     cols = st.columns(5)
-    avg_color = "red" if avg_change > 0 else ("green" if avg_change < 0 else "gray")
-    cols[0].metric("板块平均涨跌", f"{avg_change:+.2f}%", delta_color="inverse")
+    cols[0].metric("板块平均涨跌", f"{avg_change:+.2f}%")
     cols[1].metric("上涨家数", str(up_count))
     cols[2].metric("下跌家数", str(down_count))
     cols[3].metric("平盘家数", str(flat_count))
@@ -156,18 +154,16 @@ def render_quote_table() -> None:
     if df.empty:
         return
 
-    st.subheader("📈 个股实时行情")
+    st.subheader("个股实时行情")
 
-    # 构造显示用的 DataFrame
     display_df = df[["代码", "名称", "产业链", "最新价", "涨跌幅", "涨跌额", "成交额"]].copy()
     display_df = display_df.sort_values("涨跌幅", ascending=False)
 
-    # 用 column_config 设置颜色
     def color_change(val):
         if val > 0:
-            return f"color: #e53935"
+            return "color: #e53935"
         elif val < 0:
-            return f"color: #43a047"
+            return "color: #43a047"
         return ""
 
     styled = display_df.style.applymap(color_change, subset=["涨跌幅", "涨跌额"])
@@ -190,10 +186,10 @@ def render_news_feed() -> None:
     """新闻情绪分析卡片"""
     news = st.session_state.news_data
     if not news:
-        st.info("暂无相关新闻，请点击侧边栏刷新")
+        st.info("暂无相关新闻，点击侧边栏「手动刷新」获取")
         return
 
-    st.subheader(f"📰 板块新闻 · 情绪分析（共 {len(news)} 条）")
+    st.subheader(f"板块新闻 · 情绪分析（共 {len(news)} 条）")
 
     for item in news[:MAX_NEWS_DISPLAY]:
         bp = item.get("bullish_pct", 50)
@@ -247,11 +243,9 @@ def render_sector_chart() -> None:
     if hist.empty:
         return
 
-    st.subheader("📉 半导体板块指数（近20日）")
+    st.subheader("半导体板块指数（近20日）")
 
     fig = go.Figure()
-
-    # 收盘价走势
     fig.add_trace(go.Scatter(
         x=hist["日期"],
         y=hist["收盘"],
@@ -261,7 +255,6 @@ def render_sector_chart() -> None:
         marker=dict(size=4),
     ))
 
-    # 成交量柱状图
     if "成交量" in hist.columns:
         fig.add_trace(go.Bar(
             x=hist["日期"],
@@ -274,12 +267,7 @@ def render_sector_chart() -> None:
     fig.update_layout(
         xaxis_title="日期",
         yaxis_title="收盘价",
-        yaxis2=dict(
-            title="成交量",
-            overlaying="y",
-            side="right",
-            showgrid=False,
-        ),
+        yaxis2=dict(title="成交量", overlaying="y", side="right", showgrid=False),
         hovermode="x unified",
         height=350,
         margin=dict(l=10, r=10, t=10, b=10),
@@ -294,39 +282,40 @@ def render_sidebar() -> None:
     with st.sidebar:
         st.header("控制面板")
 
-        # 刷新按钮
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🔄 手动刷新", use_container_width=True):
+            if st.button("手动刷新", use_container_width=True):
                 with st.spinner("刷新中..."):
                     refresh_data(force_news=True)
                 st.rerun()
         with col2:
-            auto = st.session_state.running
-            label = "⏸ 停止自动" if auto else "▶ 开启自动刷新"
+            auto = st.session_state.auto_refresh
+            label = "停止自动" if auto else "开启自动刷新"
             if st.button(label, use_container_width=True):
-                st.session_state.running = not auto
+                st.session_state.auto_refresh = not auto
                 if not auto:
                     st.session_state.cycle_count = 0
                 st.rerun()
 
-        # 状态显示
         st.divider()
-        if st.session_state.running:
+        if st.session_state.auto_refresh:
             is_trading = is_trading_hours()
             if is_trading:
                 st.success(f"自动刷新中 · 每 {REFRESH_INTERVAL_SECONDS // 60} 分钟")
             else:
-                st.info("自动刷新暂停 · 非交易时间")
+                st.info("非交易时间，数据已缓存")
+        else:
+            is_trading = is_trading_hours()
+            if is_trading:
+                st.caption("当前为交易时间，可开启自动刷新")
 
         # API 状态
         analyzer = get_analyzer()
         if analyzer.available:
             st.success("Claude API 已配置")
         else:
-            st.warning("Claude API 未配置\n\n请在 `.env` 中设置 `CLAUDE_API_KEY`\n\n新闻将显示中性情绪")
+            st.warning("Claude API 未配置\n\n在 Streamlit Cloud → Settings → Secrets 添加:\n\nCLAUDE_API_KEY = \"sk-ant-...\"\n\n当前新闻显示中性情绪")
 
-        # 统计信息
         st.divider()
         st.caption(f"追踪股票: {len(STORAGE_STOCKS)} 只")
         st.caption(f"新闻条数: {len(st.session_state.news_data)}")
@@ -334,20 +323,26 @@ def render_sidebar() -> None:
         if st.session_state.last_refresh:
             st.caption(f"上次刷新: {format_cst(st.session_state.last_refresh)}")
 
-        # 股票列表
         st.divider()
-        st.subheader("📋 追踪列表")
-        for s in STORAGE_STOCKS:
-            st.caption(f"{s['code']} {s['name']} · {s['sector']}")
+        with st.expander("追踪列表"):
+            for s in STORAGE_STOCKS:
+                st.caption(f"{s['code']} {s['name']} · {s['sector']}")
 
 
 # ============================================================
 # 主入口
 # ============================================================
 def main():
+    # 自动刷新（使用 streamlit-autorefresh，Streamlit Cloud 兼容）
+    if st.session_state.auto_refresh:
+        limit = REFRESH_INTERVAL_SECONDS * 1000  # 转换为毫秒
+    else:
+        limit = 999999999  # 不触发自动刷新
+
+    st_autorefresh(interval=limit, key="auto_refresh_timer")
+
     render_sidebar()
     render_header()
-
     st.divider()
 
     # 初始加载
@@ -355,11 +350,15 @@ def main():
         with st.spinner("正在获取实时数据..."):
             refresh_data(force_news=True)
 
-    # 板块概览
+    # 自动刷新时的数据更新
+    if st.session_state.auto_refresh and st.session_state.last_refresh:
+        elapsed = (now_cst() - st.session_state.last_refresh).total_seconds()
+        if elapsed >= REFRESH_INTERVAL_SECONDS - 10:
+            refresh_data(force_news=False)
+
     render_sector_overview()
     st.divider()
 
-    # 图表 + 行情表格（左右布局）
     col_left, col_right = st.columns([2, 3])
     with col_left:
         render_sector_chart()
@@ -367,16 +366,7 @@ def main():
         render_quote_table()
 
     st.divider()
-
-    # 新闻情绪分析
     render_news_feed()
-
-    # 自动刷新逻辑
-    if st.session_state.running:
-        time.sleep(REFRESH_INTERVAL_SECONDS)
-        with st.spinner("自动刷新中..."):
-            refresh_data(force_news=False)
-        st.rerun()
 
 
 if __name__ == "__main__":

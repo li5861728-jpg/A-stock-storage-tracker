@@ -62,9 +62,18 @@ REFRESH_INTERVAL_SECONDS = 300  # 5 分钟
 NEWS_REFRESH_CYCLES = 2         # 每 2 个周期刷新一次新闻 (10分钟)
 
 # ============================================================
-# 缓存配置
+# 缓存配置（Streamlit Cloud 兼容：优先用 temp 目录确保可写）
 # ============================================================
-CACHE_DIR = os.path.join(os.path.dirname(__file__), "data")
+import tempfile
+_BASE = os.path.dirname(__file__)
+_DATA = os.path.join(_BASE, "data")
+# 确保目录可写，否则回退到系统临时目录
+try:
+    os.makedirs(_DATA, exist_ok=True)
+    CACHE_DIR = _DATA
+except (OSError, PermissionError):
+    CACHE_DIR = os.path.join(tempfile.gettempdir(), "storage-dashboard-data")
+    os.makedirs(CACHE_DIR, exist_ok=True)
 QUOTES_CACHE = os.path.join(CACHE_DIR, "quotes", "latest.json")
 NEWS_CACHE_PATTERN = os.path.join(CACHE_DIR, "news", "news_{date}.json")
 SENTIMENT_CACHE_PATTERN = os.path.join(CACHE_DIR, "sentiment", "sentiment_{date}.json")
