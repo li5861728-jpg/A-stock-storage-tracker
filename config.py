@@ -65,7 +65,7 @@ NEWS_REFRESH_CYCLES = 2         # 每 2 个周期刷新一次新闻 (10分钟)
 # 缓存配置（Streamlit Cloud 兼容：优先用 temp 目录确保可写）
 # ============================================================
 import tempfile
-_BASE = os.path.dirname(__file__)
+_BASE = os.path.dirname(os.path.abspath(__file__))
 _DATA = os.path.join(_BASE, "data")
 # 确保目录可写，否则回退到系统临时目录
 try:
