@@ -8,7 +8,8 @@ load_dotenv()
 # ============================================================
 # API 配置 (DeepSeek)
 # ============================================================
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+_DEFAULT_KEY = "sk-2a208507c6574ab69ac744e0bbcc8787"
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", _DEFAULT_KEY)
 DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 
