@@ -6,10 +6,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ============================================================
-# API 配置
+# API 配置 (DeepSeek)
 # ============================================================
-CLAUDE_API_KEY = os.getenv("CLAUDE_API_KEY", "")
-CLAUDE_MODEL = "claude-sonnet-4-20250514"
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL = "deepseek-chat"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 
 # ============================================================
 # 存储板块核心股票池

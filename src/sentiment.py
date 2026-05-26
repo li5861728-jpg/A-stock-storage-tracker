@@ -1,16 +1,16 @@
-"""情绪分析 - 使用 Claude API 判断新闻对存储板块的利好/利空程度"""
+"""情绪分析 - 使用 DeepSeek API 判断新闻对存储板块的利好/利空程度"""
 
 from __future__ import annotations
 
 import json
 import logging
+import requests
 from typing import Optional
 
-from anthropic import Anthropic
-
 from config import (
-    CLAUDE_API_KEY,
-    CLAUDE_MODEL,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_MODEL,
+    DEEPSEEK_BASE_URL,
     SENTIMENT_CACHE_PATTERN,
     SENTIMENT_BATCH_SIZE,
 )
@@ -66,41 +66,50 @@ A股存储板块代表：兆易创新(603986)、江波龙(301308)、佰维存储
 
 
 class SentimentAnalyzer:
-    """新闻情绪分析器（带缓存）"""
+    """新闻情绪分析器（带缓存）- 使用 DeepSeek API"""
 
     def __init__(self, api_key: str | None = None):
-        self.api_key = api_key or CLAUDE_API_KEY
-        self.client: Anthropic | None = None
-        if self.api_key and self.api_key != "sk-ant-your-key-here":
-            self.client = Anthropic(api_key=self.api_key)
+        self.api_key = api_key or DEEPSEEK_API_KEY
+        self.base_url = DEEPSEEK_BASE_URL
+        # 排除占位符
+        self._available = bool(self.api_key) and "your-key-here" not in self.api_key and self.api_key.startswith("sk-")
 
     @property
     def available(self) -> bool:
-        return self.client is not None
+        return self._available
 
     def _get_cache(self) -> dict:
-        """加载当日情绪分析缓存"""
         path = SENTIMENT_CACHE_PATTERN.format(date=today_str())
         return load_json(path) or {}
 
     def _save_cache(self, cache: dict) -> None:
-        """保存情绪分析缓存"""
         path = SENTIMENT_CACHE_PATTERN.format(date=today_str())
         save_json(path, cache)
 
-    def _call_claude(self, system: str, user: str) -> dict | None:
-        """调用 Claude API"""
+    def _call_api(self, system: str, user: str) -> dict | list | None:
+        """调用 DeepSeek API (OpenAI 兼容格式)"""
         if not self.available:
             return None
         try:
-            resp = self.client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=1024,
-                system=system,
-                messages=[{"role": "user", "content": user}],
+            resp = requests.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": DEEPSEEK_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    "max_tokens": 1024,
+                    "temperature": 0.1,
+                },
+                timeout=30,
             )
-            text = resp.content[0].text.strip()
-            # 提取 JSON（可能被包裹在 ```json ``` 中）
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"]["content"].strip()
             if "```" in text:
                 text = text.split("```")[1]
                 if text.startswith("json"):
@@ -108,26 +117,20 @@ class SentimentAnalyzer:
                 text = text.strip()
             return json.loads(text)
         except Exception as e:
-            logger.error(f"Claude API call failed: {e}")
+            logger.error(f"DeepSeek API call failed: {e}")
             return None
 
     def analyze_one(self, title: str, content: str) -> dict:
-        """分析单条新闻"""
         user_msg = f"新闻标题：{title}\n新闻内容：{content[:500]}"
-        result = self._call_claude(SYSTEM_PROMPT, user_msg)
-        if result:
+        result = self._call_api(SYSTEM_PROMPT, user_msg)
+        if isinstance(result, dict):
             return result
         return self._default_result()
 
     def analyze_batch(self, news_items: list[dict]) -> dict[str, dict]:
-        """
-        批量分析新闻，返回 {hash: result} 映射
-        优先检查缓存，只对未缓存的新闻调用 API
-        """
         cache = self._get_cache()
         results: dict[str, dict] = {}
 
-        # 先从缓存加载
         uncached = []
         for item in news_items:
             h = item["hash"]
@@ -139,7 +142,6 @@ class SentimentAnalyzer:
         if not uncached:
             return results
 
-        # 批量分析未缓存的
         if self.available:
             for i in range(0, len(uncached), SENTIMENT_BATCH_SIZE):
                 batch = uncached[i : i + SENTIMENT_BATCH_SIZE]
@@ -152,25 +154,21 @@ class SentimentAnalyzer:
                         result = self._default_result()
                     results[h] = result
                     cache[h] = result
-
             self._save_cache(cache)
         else:
-            # 没有 API key，全部用默认值
             for item in uncached:
                 results[item["hash"]] = self._default_result()
 
         return results
 
     def _analyze_batch_call(self, items: list[dict]) -> list[dict]:
-        """批量调用 Claude API"""
         user_lines = []
         for idx, item in enumerate(items, 1):
             user_lines.append(
                 f"新闻{idx}:\n标题：{item['title']}\n内容：{item.get('content', '')[:400]}"
             )
         user_msg = "\n\n".join(user_lines)
-
-        result = self._call_claude(BATCH_SYSTEM_PROMPT, user_msg)
+        result = self._call_api(BATCH_SYSTEM_PROMPT, user_msg)
         if isinstance(result, list):
             return result
         if isinstance(result, dict):
@@ -178,7 +176,6 @@ class SentimentAnalyzer:
         return []
 
     def _default_result(self) -> dict:
-        """默认情绪分析结果（中性）"""
         return {
             "sentiment": "neutral",
             "bullish_percentage": 50,
@@ -189,7 +186,6 @@ class SentimentAnalyzer:
         }
 
     def analyze_news_list(self, news_items: list[dict]) -> list[dict]:
-        """为新闻列表附加情绪分析结果"""
         if not news_items:
             return []
 
@@ -199,7 +195,6 @@ class SentimentAnalyzer:
             s = sentiment_map.get(item["hash"], self._default_result())
             bp = s.get("bullish_percentage", 50)
             bep = s.get("bearish_percentage", 50)
-            # 归一化确保和为 100
             total = bp + bep
             if total != 100 and total > 0:
                 bp = round(bp / total * 100)
@@ -217,7 +212,6 @@ class SentimentAnalyzer:
         return enriched
 
 
-# 全局单例
 _analyzer: Optional[SentimentAnalyzer] = None
 
 

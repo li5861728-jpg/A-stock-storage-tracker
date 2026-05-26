@@ -312,9 +312,9 @@ def render_sidebar() -> None:
         # API 状态
         analyzer = get_analyzer()
         if analyzer.available:
-            st.success("Claude API 已配置")
+            st.success("DeepSeek API 已配置")
         else:
-            st.warning("Claude API 未配置\n\n在 Streamlit Cloud → Settings → Secrets 添加:\n\nCLAUDE_API_KEY = \"sk-ant-...\"\n\n当前新闻显示中性情绪")
+            st.warning("DeepSeek API 未配置\n\n在 Streamlit Cloud → Settings → Secrets 添加:\n\nDEEPSEEK_API_KEY = \"sk-...\"\n\n当前新闻显示中性情绪")
 
         st.divider()
         st.caption(f"追踪股票: {len(STORAGE_STOCKS)} 只")
