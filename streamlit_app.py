@@ -3,273 +3,172 @@
 from __future__ import annotations
 
 import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
 import traceback
 
-from config import (
-    STORAGE_STOCKS,
-    REFRESH_INTERVAL_SECONDS,
-    NEWS_REFRESH_CYCLES,
-    MAX_NEWS_DISPLAY,
-)
+from config import MAX_NEWS_DISPLAY
 from src.utils import now_cst, get_market_status, is_trading_hours, format_cst
-from src.fetcher import fetch_quotes, fetch_sector_history
 from src.news_fetcher import fetch_news
 from src.sentiment import get_analyzer
 
 st.set_page_config(
-    page_title="存储板块情绪日报",
-    page_icon="🏭",
+    page_title="存储板块信息情绪日报",
+    page_icon="📰",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 st.markdown("""
 <style>
-    .sentiment-bullish { color: #e53935; font-weight: bold; font-size: 1.1rem; }
-    .sentiment-bearish { color: #43a047; font-weight: bold; font-size: 1.1rem; }
-    .sentiment-neutral { color: #757575; font-weight: bold; font-size: 1.1rem; }
-    .news-card { padding: 12px; margin: 8px 0; border-radius: 8px; border-left: 4px solid #ddd; }
-    .news-card.bullish { border-left-color: #e53935; background: #fff5f5; }
+    .sentiment-bullish { color: #e53935; font-weight: bold; font-size: 1.2rem; }
+    .sentiment-bearish { color: #43a047; font-weight: bold; font-size: 1.2rem; }
+    .sentiment-neutral { color: #757575; font-weight: bold; font-size: 1.2rem; }
+    .news-card { padding: 18px 20px; margin: 12px 0; border-radius: 10px; border-left: 5px solid #ddd; }
+    .news-card.bullish { border-left-color: #e53935; background: #fff8f8; }
     .news-card.bearish { border-left-color: #43a047; background: #f5fff5; }
     .news-card.neutral { border-left-color: #bdbdbd; background: #fafafa; }
-    .error-box { background: #fff5f5; border: 1px solid #e53935; border-radius: 8px; padding: 16px; margin: 8px 0; }
+    .pct-bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 8px; }
+    .meta-text { color: #999; font-size: 0.82rem; }
+    .news-title { font-size: 1.08rem; line-height: 1.5; }
+    .news-content { color: #555; font-size: 0.92rem; line-height: 1.6; margin-top: 8px; }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
-# Session State
-# ============================================================
-if "init" not in st.session_state:
-    st.session_state.init = True
-    st.session_state.cycle_count = 0
-    st.session_state.last_refresh = None
-    st.session_state.quotes_df = pd.DataFrame()
+if "news_data" not in st.session_state:
     st.session_state.news_data = []
-    st.session_state.sector_history = pd.DataFrame()
+    st.session_state.last_refresh = None
     st.session_state.errors = []
-    st.session_state.auto_refresh = False
 
 
-# ============================================================
-# 数据刷新
-# ============================================================
-def refresh_data(force_news: bool = False) -> None:
+def refresh():
     errors = []
-
     try:
-        df = fetch_quotes(use_cache=not force_news)
-        if not df.empty:
-            st.session_state.quotes_df = df
+        raw = fetch_news(force_refresh=True)
+        analyzer = get_analyzer()
+        st.session_state.news_data = analyzer.analyze_news_list(raw)
     except Exception as e:
-        errors.append(f"行情获取失败: {str(e)[:80]}")
-
-    try:
-        hist = fetch_sector_history(days=20)
-        if not hist.empty:
-            st.session_state.sector_history = hist
-    except Exception as e:
-        errors.append(f"板块指数获取失败: {str(e)[:80]}")
-
-    if force_news or st.session_state.cycle_count % NEWS_REFRESH_CYCLES == 0:
-        try:
-            raw_news = fetch_news(force_refresh=force_news)
-            analyzer = get_analyzer()
-            enriched = analyzer.analyze_news_list(raw_news)
-            st.session_state.news_data = enriched
-        except Exception as e:
-            errors.append(f"新闻获取失败: {str(e)[:80]}")
-
+        errors.append(f"新闻获取失败: {str(e)[:100]}")
     st.session_state.last_refresh = now_cst()
-    st.session_state.cycle_count += 1
     st.session_state.errors = errors
 
 
-# ============================================================
-# UI
-# ============================================================
-def render_header():
-    status, status_label = get_market_status()
-    is_trading = status == "trading"
+def render_news_card(item: dict):
+    bp = item.get("bullish_pct", 50)
+    bep = item.get("bearish_pct", 50)
+    sentiment = item.get("sentiment", "neutral")
+    reasoning = item.get("reasoning", "")
+    content = item.get("content", "")
+    source = item.get("source", "")
+    pub_time = item.get("pub_time", "")
 
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
-        st.title("A股存储板块情绪日报")
-    with col2:
-        color = "#e53935" if is_trading else "#888"
-        st.markdown(f"### 市场: <span style='color:{color}'>● {status_label}</span>", unsafe_allow_html=True)
-    with col3:
-        last = st.session_state.last_refresh
-        st.markdown(f"**更新**\n\n{format_cst(last) if last else '尚未刷新'}")
+    if sentiment == "bullish":
+        emoji, pct_text, css, sc = "📈", f"利好 {bp}%", "bullish", "sentiment-bullish"
+    elif sentiment == "bearish":
+        emoji, pct_text, css, sc = "📉", f"利空 {bep}%", "bearish", "sentiment-bearish"
+    else:
+        emoji, pct_text, css, sc = "➖", f"中性 {bp}%", "neutral", "sentiment-neutral"
 
-    if st.session_state.errors:
-        for err in st.session_state.errors:
-            st.warning(f"⚠ {err}")
-
-
-def render_sector_overview():
-    df = st.session_state.quotes_df
-    if df.empty:
-        st.info("暂无行情数据，点击侧边栏「手动刷新」获取")
-        return
-
-    up = len(df[df["涨跌幅"] > 0])
-    down = len(df[df["涨跌幅"] < 0])
-    flat = len(df[df["涨跌幅"] == 0])
-    avg = df["涨跌幅"].mean() if not df.empty else 0
-    total = df["成交额"].sum() if not df.empty else 0
-
-    cols = st.columns(5)
-    cols[0].metric("板块平均涨跌", f"{avg:+.2f}%")
-    cols[1].metric("上涨", str(up))
-    cols[2].metric("下跌", str(down))
-    cols[3].metric("平盘", str(flat))
-    cols[4].metric("总成交额", f"{total:.2f}亿")
-
-
-def render_quote_table():
-    df = st.session_state.quotes_df
-    if df.empty:
-        return
-    st.subheader("个股实时行情")
-    disp = df[["代码", "名称", "产业链", "最新价", "涨跌幅", "涨跌额", "成交额"]].copy()
-    disp = disp.sort_values("涨跌幅", ascending=False)
-
-    def color_change(val):
-        if val > 0:
-            return "color: #e53935"
-        elif val < 0:
-            return "color: #43a047"
-        return ""
-
-    styled = disp.style.applymap(color_change, subset=["涨跌幅", "涨跌额"])
-    styled = styled.format({"最新价": "{:.2f}", "涨跌幅": "{:+.2f}%", "涨跌额": "{:+.2f}", "成交额": "{:.2f}亿"})
-    st.dataframe(styled, use_container_width=True, hide_index=True, height=min(38 * len(disp) + 38, 600))
-
-
-def render_news_feed():
-    news = st.session_state.news_data
-    if not news:
-        st.info("暂无相关新闻，点击「手动刷新」获取")
-        return
-
-    st.subheader(f"板块新闻 · 情绪分析（{len(news)} 条）")
-
-    for item in news[:MAX_NEWS_DISPLAY]:
-        bp = item.get("bullish_pct", 50)
-        bep = item.get("bearish_pct", 50)
-        sentiment = item.get("sentiment", "neutral")
-        reasoning = item.get("reasoning", "")
-
-        if sentiment == "bullish":
-            emoji, pct_text, css_class, sc = "🔴", f"利好 {bp}%", "bullish", "sentiment-bullish"
-        elif sentiment == "bearish":
-            emoji, pct_text, css_class, sc = "🟢", f"利空 {bep}%", "bearish", "sentiment-bearish"
-        else:
-            emoji, pct_text, css_class, sc = "⚪", "中性 50%", "neutral", "sentiment-neutral"
-
-        st.markdown(f"""
-        <div class="news-card {css_class}">
-            <div style="display:flex;justify-content:space-between;align-items:center">
-                <strong>{emoji} {item['title']}</strong>
+    st.markdown(f"""
+    <div class="news-card {css}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:20px">
+            <div style="flex:1">
+                <div class="news-title"><strong>{emoji} {item['title']}</strong></div>
+                {f'<div class="news-content">{content[:300]}</div>' if content else ''}
+                <div style="margin-top:8px">
+                    <span class="meta-text">{source}</span>
+                    <span class="meta-text" style="margin-left:12px">{pub_time}</span>
+                    {f'<span class="meta-text" style="margin-left:12px;color:#666">💡 {reasoning}</span>' if reasoning and reasoning != '暂未分析，等待 API 配置' else ''}
+                </div>
+            </div>
+            <div style="text-align:center;min-width:80px">
                 <span class="{sc}">{pct_text}</span>
+                <div class="pct-bar">
+                    <div style="width:{bp}%;background:#e53935"></div>
+                    <div style="width:{bep}%;background:#43a047"></div>
+                </div>
             </div>
-            <div style="margin-top:6px;color:#555;font-size:0.9rem">{item.get('content','')[:200]}</div>
-            <div style="margin-top:6px;display:flex;justify-content:space-between;color:#999;font-size:0.8rem">
-                <span>{item.get('source','未知')} | {item.get('pub_time','')}</span>
-                <span>{reasoning}</span>
-            </div>
-            <div style="margin-top:4px"><div style="display:flex;height:4px;border-radius:2px;overflow:hidden">
-                <div style="width:{bp}%;background:#e53935"></div>
-                <div style="width:{bep}%;background:#43a047"></div>
-            </div></div>
         </div>
-        """, unsafe_allow_html=True)
-
-
-def render_sector_chart():
-    hist = st.session_state.sector_history
-    if hist.empty:
-        return
-
-    st.subheader("半导体板块指数（近20日）")
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=hist["日期"], y=hist["收盘"], mode="lines+markers",
-        name="收盘价", line=dict(color="#e53935", width=2), marker=dict(size=4)))
-    if "成交量" in hist.columns:
-        fig.add_trace(go.Bar(x=hist["日期"], y=hist["成交量"], name="成交量",
-            yaxis="y2", marker=dict(color="rgba(200,200,200,0.5)")))
-    fig.update_layout(xaxis_title="日期", yaxis_title="收盘价",
-        yaxis2=dict(title="成交量", overlaying="y", side="right", showgrid=False),
-        hovermode="x unified", height=350, margin=dict(l=10, r=10, t=10, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02))
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def render_sidebar():
-    with st.sidebar:
-        st.header("控制面板")
-
-        if st.button("手动刷新", use_container_width=True):
-            with st.spinner("刷新中..."):
-                refresh_data(force_news=True)
-            st.rerun()
-
-        is_trading = is_trading_hours()
-        if is_trading:
-            st.success("当前为交易时间")
-        else:
-            st.info("非交易时间")
-
-        analyzer = get_analyzer()
-        if analyzer.available:
-            st.success("DeepSeek API 已配置")
-        else:
-            st.warning("DeepSeek API 未配置")
-
-        st.divider()
-        st.caption(f"股票: {len(STORAGE_STOCKS)} 只 | 新闻: {len(st.session_state.news_data)} 条")
-        st.caption(f"刷新: {st.session_state.cycle_count} 次")
-        if st.session_state.last_refresh:
-            st.caption(f"上次: {format_cst(st.session_state.last_refresh)}")
-
-        with st.expander("追踪列表"):
-            for s in STORAGE_STOCKS:
-                st.caption(f"{s['code']} {s['name']} · {s['sector']}")
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ============================================================
 def main():
     try:
-        render_sidebar()
-        render_header()
+        # Header
+        status, label = get_market_status()
+        is_trading = status == "trading"
+        color = "#e53935" if is_trading else "#888"
+
+        col1, col2, col3 = st.columns([3, 1, 1])
+        with col1:
+            st.title("📰 存储板块信息 · 情绪日报")
+            st.caption("客观汇总公开平台最新信息，AI 分析对存储板块的利好/利空影响")
+        with col2:
+            st.markdown(f"### 市场: <span style='color:{color}'>● {label}</span>", unsafe_allow_html=True)
+        with col3:
+            if st.button("🔄 刷新信息", use_container_width=True, type="primary"):
+                with st.spinner("正在获取最新信息..."):
+                    refresh()
+                st.rerun()
+
+        # 更新时间
+        last = st.session_state.last_refresh
+        if last:
+            st.caption(f"更新时间: {format_cst(last)} · 刷新页面获取最新")
+        else:
+            st.caption("点击「刷新信息」获取最新资讯")
+
+        # 自动首次加载
+        if not st.session_state.news_data and last is None:
+            with st.spinner("正在获取最新信息..."):
+                refresh()
+            st.rerun()
+
+        if st.session_state.errors:
+            for e in st.session_state.errors:
+                st.warning(f"⚠ {e}")
+
         st.divider()
 
-        if st.session_state.quotes_df.empty and st.session_state.last_refresh is None:
-            with st.spinner("正在获取实时数据..."):
-                refresh_data(force_news=True)
+        # 新闻流
+        news = st.session_state.news_data
+        if not news:
+            st.info("暂无相关信息，请点击「刷新信息」按钮获取")
+            return
 
-        render_sector_overview()
+        # 统计
+        bullish_count = sum(1 for n in news if n.get("sentiment") == "bullish")
+        bearish_count = sum(1 for n in news if n.get("sentiment") == "bearish")
+        neutral_count = sum(1 for n in news if n.get("sentiment") == "neutral")
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("信息总数", str(len(news)))
+        c2.metric("📈 利好", str(bullish_count))
+        c3.metric("📉 利空", str(bearish_count))
+        c4.metric("➖ 中性", str(neutral_count))
+
         st.divider()
 
-        col_left, col_right = st.columns([2, 3])
-        with col_left:
-            render_sector_chart()
-        with col_right:
-            render_quote_table()
+        # 筛选
+        filt = st.radio("筛选", ["全部", "利好", "利空", "中性"], horizontal=True, label_visibility="collapsed")
+        for item in news[:MAX_NEWS_DISPLAY]:
+            s = item.get("sentiment", "neutral")
+            if filt == "利好" and s != "bullish":
+                continue
+            if filt == "利空" and s != "bearish":
+                continue
+            if filt == "中性" and s != "neutral":
+                continue
+            render_news_card(item)
 
+        # Footer
         st.divider()
-        render_news_feed()
+        st.caption(f"共 {len(news)} 条信息 · 来源: 财联社 / 东方财富 / 新浪财经 · 情绪分析由 AI 生成，仅供参考")
 
-    except Exception as e:
-        st.error(f"页面渲染出错，请点击「手动刷新」重试")
-        st.markdown(f"""
-        <div class="error-box">
-            <strong>错误详情:</strong><br>
-            <pre style="white-space:pre-wrap;font-size:0.8rem">{traceback.format_exc()}</pre>
-        </div>
-        """, unsafe_allow_html=True)
+    except Exception:
+        st.error("页面出错，请点击「刷新信息」重试")
+        st.markdown(f"<pre style='font-size:0.75rem'>{traceback.format_exc()}</pre>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
