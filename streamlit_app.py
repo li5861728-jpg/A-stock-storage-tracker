@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import streamlit as st
+import streamlit.components.v1 as components
 import traceback
 
-from config import MAX_NEWS_DISPLAY
+from config import MAX_NEWS_DISPLAY, REFRESH_INTERVAL_SECONDS
 from src.utils import now_cst, get_market_status, is_trading_hours, format_cst
 from src.news_fetcher import fetch_news
 from src.sentiment import get_analyzer
@@ -38,6 +39,7 @@ if "news_data" not in st.session_state:
     st.session_state.news_data = []
     st.session_state.last_refresh = None
     st.session_state.errors = []
+    st.session_state.auto = False
 
 
 def refresh():
@@ -107,17 +109,36 @@ def main():
         with col2:
             st.markdown(f"### 市场: <span style='color:{color}'>● {label}</span>", unsafe_allow_html=True)
         with col3:
-            if st.button("🔄 刷新信息", use_container_width=True, type="primary"):
-                with st.spinner("正在获取最新信息..."):
-                    refresh()
-                st.rerun()
+            c_btn, c_auto = st.columns([1, 1])
+            with c_btn:
+                if st.button("🔄 刷新信息", use_container_width=True, type="primary"):
+                    with st.spinner("正在获取最新信息..."):
+                        refresh()
+                    st.rerun()
+            with c_auto:
+                auto_label = "⏸ 停止自动" if st.session_state.auto else "▶ 自动刷新"
+                if st.button(auto_label, use_container_width=True):
+                    st.session_state.auto = not st.session_state.auto
+                    st.rerun()
 
-        # 更新时间
+        # 更新时间 + 自动刷新状态
         last = st.session_state.last_refresh
         if last:
-            st.caption(f"更新时间: {format_cst(last)} · 刷新页面获取最新")
+            if st.session_state.auto:
+                st.caption(f"更新时间: {format_cst(last)} · 🔄 每 {REFRESH_INTERVAL_SECONDS // 60} 分钟自动刷新")
+            else:
+                st.caption(f"更新时间: {format_cst(last)} · 点击按钮获取最新")
         else:
             st.caption("点击「刷新信息」获取最新资讯")
+
+        # 自动刷新 JS（交易时间 + 启用开关时生效）
+        if st.session_state.auto and is_trading:
+            interval_ms = REFRESH_INTERVAL_SECONDS * 1000
+            components.html(f"""
+            <script>
+            setTimeout(function(){{ window.location.reload(); }}, {interval_ms});
+            </script>
+            """, height=0)
 
         # 自动首次加载
         if not st.session_state.news_data and last is None:
